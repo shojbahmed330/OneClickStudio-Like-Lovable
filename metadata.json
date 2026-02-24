@@ -1,0 +1,9 @@
+{
+  "name": "OneClick Studio: Modular AI Builder",
+  "description": "AI-powered system for building modular hybrid apps with GitHub automation, automatic APK builds, and live admin dashboards.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
