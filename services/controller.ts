@@ -79,7 +79,8 @@ export class AIController {
       const exists = currentFiles[path];
 
       if (exists) {
-        const isPatch = content.startsWith("--- ") && content.includes("@@ ");
+        const trimmed = content.trim();
+        const isPatch = trimmed.startsWith("--- ") && trimmed.includes("@@ ");
 
         if (!isPatch) {
           violations.push(path);
@@ -159,9 +160,18 @@ export class AIController {
       try {
         let generatedFiles: Record<string, string> = {};
         let currentContextFiles = { ...currentFiles };
+        let accumulatedApplyErrors: string[] = [];
         let thoughts: string[] = [];
         let finalPlan: string[] = [];
         let finalAnswer: string = "Task completed successfully.";
+
+        const applyPhaseFiles = (phaseFiles: Record<string, string>) => {
+          generatedFiles = { ...generatedFiles, ...phaseFiles };
+          const { merged, errors } = this.applyChanges(currentContextFiles, phaseFiles);
+          currentContextFiles = merged;
+          accumulatedApplyErrors.push(...errors);
+          this.updateDependencyGraph(currentContextFiles);
+        };
 
         const isPatchMode = mode === GenerationMode.EDIT || mode === GenerationMode.FIX || mode === GenerationMode.OPTIMIZE;
         const patchInstruction = isPatchMode ? "\nPATCH MODE (STRICT):\nIf a file already exists in the PROJECT MAP, you MUST return ONLY a unified diff patch.\nIf you return the full file content for an existing file, your response will be REJECTED.\n" : "";
@@ -196,9 +206,7 @@ export class AIController {
           const code = await this.executePhaseWithCache('coding', input, modelName);
           thoughts.push(`[CODE]: ${code.thought || 'Implemented code.'}`);
           if (code.answer) finalAnswer = code.answer;
-          generatedFiles = { ...generatedFiles, ...(code.files || {}) };
-          currentContextFiles = { ...currentContextFiles, ...generatedFiles };
-          this.updateDependencyGraph(currentContextFiles);
+          applyPhaseFiles(code.files || {});
         }
 
         // Phase 3: Review
@@ -210,9 +218,7 @@ export class AIController {
           const review = await this.executePhaseWithCache('review', input, modelName);
           thoughts.push(`[REVIEW]: ${review.thought || 'Reviewed code.'}`);
           if (mode === GenerationMode.FIX && review.answer) finalAnswer = review.answer;
-          generatedFiles = { ...generatedFiles, ...(review.files || {}) };
-          currentContextFiles = { ...currentContextFiles, ...generatedFiles };
-          this.updateDependencyGraph(currentContextFiles);
+          applyPhaseFiles(review.files || {});
         }
 
         // Phase 4: Security
@@ -223,9 +229,7 @@ export class AIController {
           const security = await this.executePhaseWithCache('security', input, modelName);
           thoughts.push(`[SECURITY]: ${security.thought || 'Security audit complete.'}`);
           if (mode === GenerationMode.OPTIMIZE && security.answer) finalAnswer = security.answer;
-          generatedFiles = { ...generatedFiles, ...(security.files || {}) };
-          currentContextFiles = { ...currentContextFiles, ...generatedFiles };
-          this.updateDependencyGraph(currentContextFiles);
+          applyPhaseFiles(security.files || {});
         }
 
         // Phase 5: Performance
@@ -235,9 +239,7 @@ export class AIController {
             : `FILES TO AUDIT:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
           const perf = await this.executePhaseWithCache('performance', input, modelName);
           thoughts.push(`[PERF]: ${perf.thought || 'Performance audit complete.'}`);
-          generatedFiles = { ...generatedFiles, ...(perf.files || {}) };
-          currentContextFiles = { ...currentContextFiles, ...generatedFiles };
-          this.updateDependencyGraph(currentContextFiles);
+          applyPhaseFiles(perf.files || {});
         }
 
         // Phase 6: UI/UX
@@ -247,9 +249,7 @@ export class AIController {
             : `FILES TO POLISH:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
           const uiux = await this.executePhaseWithCache('uiux', input, modelName);
           thoughts.push(`[UIUX]: ${uiux.thought || 'UI/UX polish complete.'}`);
-          generatedFiles = { ...generatedFiles, ...(uiux.files || {}) };
-          currentContextFiles = { ...currentContextFiles, ...generatedFiles };
-          this.updateDependencyGraph(currentContextFiles);
+          applyPhaseFiles(uiux.files || {});
         }
 
         // 3.5 Patch Enforcement Check
@@ -263,7 +263,8 @@ export class AIController {
         }
 
         // 4. Diff Engine & Migration Logic
-        const { merged: mergedFiles, errors: applyErrors } = this.applyChanges(currentFiles, generatedFiles);
+        const mergedFiles = currentContextFiles;
+        const applyErrors = accumulatedApplyErrors;
 
         // Update dependency graph with merged files BEFORE validation
         this.updateDependencyGraph(mergedFiles);
@@ -365,7 +366,8 @@ export class AIController {
       // Diff Engine: Apply as patch if file exists
       if (base[path]) {
         try {
-          const isUnifiedDiff = newContent.startsWith('--- ') && newContent.includes('@@ ');
+          const trimmed = newContent.trim();
+          const isUnifiedDiff = trimmed.startsWith('--- ') && trimmed.includes('@@ ');
 
           // Check if the AI returned a unified diff patch format directly
           if (isUnifiedDiff) {
@@ -414,7 +416,8 @@ export class AIController {
           }
         } catch (e) {
           console.error(`[Diff Engine] Error applying changes to ${path}:`, e);
-          result[path] = newContent; // Fallback to overwrite
+          errors.push(`Failed to apply patch for ${path} due to a parsing error. Please provide the FULL file content instead of a patch.`);
+          result[path] = base[path]; // Fallback to keep old content
         }
       } else {
         // New file
