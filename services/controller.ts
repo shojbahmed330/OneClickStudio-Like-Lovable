@@ -20,6 +20,8 @@ export class AIController {
   constructor() {
     this.gemini = new GeminiService();
     this.dmp = new diff_match_patch();
+    this.dmp.Match_Threshold = 0.5; // Default threshold to allow minor context mismatches
+    this.dmp.Match_Distance = 1000;
   }
 
   private hashContent(content: string): string {
@@ -67,18 +69,40 @@ export class AIController {
       console.log(`[Memory] Cache hit for phase: ${phase}`);
       return this.memory.phaseCache.get(phaseKey);
     }
-    const result = await this.gemini.callPhase(phase, input, modelName);
+    
+    let result = await this.gemini.callPhase(phase, input, modelName);
+    
+    // Sometimes the LLM returns invalid JSON (e.g. unescaped quotes or missing brackets).
+    // If result is a string, try to parse it. If it fails, we might need to repair it.
+    if (typeof result === 'string') {
+      try {
+        result = JSON.parse(result);
+      } catch (parseError) {
+        console.warn(`[Controller] Failed to parse JSON from phase ${phase}. Attempting repair...`);
+        try {
+          // Basic repair: strip markdown blocks if present
+          let repaired = result.replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+          result = JSON.parse(repaired);
+        } catch (repairError) {
+          console.error(`[Controller] JSON repair failed for phase ${phase}. Returning raw result.`);
+          // We throw an error so the orchestration loop can catch it and retry
+          throw new Error(`Invalid JSON returned by AI in phase ${phase}: ${parseError}`);
+        }
+      }
+    }
+    
     this.memory.phaseCache.set(phaseKey, result);
     return result;
   }
 
-  private enforcePatchRules(generatedFiles: Record<string, string>, currentFiles: Record<string, string>): string[] {
+  private enforcePatchRules(generatedFiles: Record<string, string>, currentFiles: Record<string, string>, exemptedFiles: Set<string>): string[] {
     const violations: string[] = [];
 
     for (const [path, content] of Object.entries(generatedFiles)) {
       const exists = currentFiles[path];
 
-      if (exists) {
+      // Configs and index.html should always be full overwrites, never patches
+      if (exists && path !== 'package.json' && path !== 'metadata.json' && path !== 'index.html' && !exemptedFiles.has(path)) {
         const trimmed = content.trim();
         const isPatch = trimmed.startsWith("--- ") && trimmed.includes("@@ ");
 
@@ -153,8 +177,9 @@ export class AIController {
 
     // 3. Orchestration Loop
     let attempts = 0;
-    const maxAttempts = 2;
+    const maxAttempts = 3;
     let finalResult: GenerationResult | null = null;
+    let failedPatchFiles = new Set<string>();
 
     while (attempts < maxAttempts) {
       try {
@@ -165,18 +190,31 @@ export class AIController {
         let finalPlan: string[] = [];
         let finalAnswer: string = "Task completed successfully.";
 
+        let currentPrompt = prompt;
+        if (failedPatchFiles.size > 0) {
+          currentPrompt += `\n\n🚨 CRITICAL RECOVERY MODE:\nYou previously failed to generate valid patches for these files:\n${Array.from(failedPatchFiles).map(f => `- ${f}`).join('\n')}\n\nFor these specific files ONLY, DO NOT USE PATCHES. You MUST return the FULL, complete file content.`;
+        }
+
         const applyPhaseFiles = (phaseFiles: Record<string, string>) => {
           generatedFiles = { ...generatedFiles, ...phaseFiles };
-          const { merged, errors } = this.applyChanges(currentContextFiles, phaseFiles);
+          const { merged, errors } = this.applyChanges(currentContextFiles, phaseFiles, failedPatchFiles);
           currentContextFiles = merged;
           accumulatedApplyErrors.push(...errors);
+          
+          for (const err of errors) {
+            const match = err.match(/Failed to apply patch for ([^\s]+)/);
+            if (match && match[1]) {
+              failedPatchFiles.add(match[1]);
+            }
+          }
+          
           this.updateDependencyGraph(currentContextFiles);
         };
 
         const isPatchMode = mode === GenerationMode.EDIT || mode === GenerationMode.FIX || mode === GenerationMode.OPTIMIZE;
         const patchInstruction = isPatchMode ? "\nPATCH MODE (STRICT):\nIf a file already exists in the PROJECT MAP, you MUST return ONLY a unified diff patch.\nIf you return the full file content for an existing file, your response will be REJECTED.\n" : "";
 
-        const impactedFiles = this.analyzeImpact(prompt);
+        const impactedFiles = this.analyzeImpact(currentPrompt);
         const impactInstruction = impactedFiles.length > 0
           ? `\n\n🚨 STRUCTURAL IMPACT DETECTED:\nThe following files are structurally dependent and MUST be reviewed/updated to prevent breaking changes:\n${impactedFiles.map(f => `- ${f}`).join('\n')}\n\nYou MUST include updates for these files in your plan steps.`
           : "";
@@ -190,7 +228,7 @@ export class AIController {
 
         // Phase 1: Planning
         if (phases.includes("planning")) {
-          const planningPrompt = prompt + impactInstruction;
+          const planningPrompt = currentPrompt + impactInstruction;
           const input = this.buildPhaseInput('planning', planningPrompt, currentContextFiles, activeWorkspace);
           const plan = await this.executePhaseWithCache('planning', input, modelName);
           thoughts.push(`[PLAN]: ${plan.thought || 'Planned architecture.'}`);
@@ -199,10 +237,10 @@ export class AIController {
 
         // Phase 2: Coding (Developer)
         if (phases.includes("coding")) {
-          const codingPrompt = prompt + enforceInstruction;
+          const codingPrompt = currentPrompt + enforceInstruction;
           const input = mode === GenerationMode.SCAFFOLD 
-            ? `PLAN:\n${JSON.stringify(finalPlan)}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
-            : `USER REQUEST:\n${codingPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
+            ? `PLAN:\n${JSON.stringify(finalPlan)}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
+            : `USER REQUEST:\n${codingPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
           const code = await this.executePhaseWithCache('coding', input, modelName);
           thoughts.push(`[CODE]: ${code.thought || 'Implemented code.'}`);
           if (code.answer) finalAnswer = code.answer;
@@ -211,10 +249,10 @@ export class AIController {
 
         // Phase 3: Review
         if (phases.includes("review")) {
-          const reviewPrompt = prompt + enforceInstruction;
+          const reviewPrompt = currentPrompt + enforceInstruction;
           const input = mode === GenerationMode.FIX
-            ? `USER REQUEST (FIX ERROR):\n${reviewPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
-            : `GENERATED FILES:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
+            ? `USER REQUEST (FIX ERROR):\n${reviewPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
+            : `GENERATED FILES:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
           const review = await this.executePhaseWithCache('review', input, modelName);
           thoughts.push(`[REVIEW]: ${review.thought || 'Reviewed code.'}`);
           if (mode === GenerationMode.FIX && review.answer) finalAnswer = review.answer;
@@ -224,8 +262,8 @@ export class AIController {
         // Phase 4: Security
         if (phases.includes("security")) {
           const input = mode === GenerationMode.OPTIMIZE
-            ? `USER REQUEST (OPTIMIZE SECURITY):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
-            : `FILES TO SECURE:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
+            ? `USER REQUEST (OPTIMIZE SECURITY):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
+            : `FILES TO SECURE:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
           const security = await this.executePhaseWithCache('security', input, modelName);
           thoughts.push(`[SECURITY]: ${security.thought || 'Security audit complete.'}`);
           if (mode === GenerationMode.OPTIMIZE && security.answer) finalAnswer = security.answer;
@@ -235,8 +273,8 @@ export class AIController {
         // Phase 5: Performance
         if (phases.includes("performance")) {
           const input = mode === GenerationMode.OPTIMIZE
-            ? `USER REQUEST (OPTIMIZE PERFORMANCE):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
-            : `FILES TO AUDIT:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
+            ? `USER REQUEST (OPTIMIZE PERFORMANCE):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
+            : `FILES TO AUDIT:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
           const perf = await this.executePhaseWithCache('performance', input, modelName);
           thoughts.push(`[PERF]: ${perf.thought || 'Performance audit complete.'}`);
           applyPhaseFiles(perf.files || {});
@@ -245,15 +283,15 @@ export class AIController {
         // Phase 6: UI/UX
         if (phases.includes("uiux")) {
           const input = mode === GenerationMode.OPTIMIZE
-            ? `USER REQUEST (OPTIMIZE UI/UX):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
-            : `FILES TO POLISH:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
+            ? `USER REQUEST (OPTIMIZE UI/UX):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
+            : `FILES TO POLISH:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
           const uiux = await this.executePhaseWithCache('uiux', input, modelName);
           thoughts.push(`[UIUX]: ${uiux.thought || 'UI/UX polish complete.'}`);
           applyPhaseFiles(uiux.files || {});
         }
 
         // 3.5 Patch Enforcement Check
-        const patchViolations = this.enforcePatchRules(generatedFiles, currentFiles);
+        const patchViolations = this.enforcePatchRules(generatedFiles, currentFiles, failedPatchFiles);
         if (patchViolations.length > 0) {
           console.warn(`[Controller] Patch violation detected for:`, patchViolations);
           const violationMsg = `Patch violation detected for:\n${patchViolations.join('\n')}\n\nThese files already exist. You MUST return unified diff patches for them. Do NOT return the full file.`;
@@ -350,7 +388,7 @@ export class AIController {
     return GenerationMode.EDIT;
   }
 
-  private applyChanges(base: Record<string, string>, changes: Record<string, string>): { merged: Record<string, string>, errors: string[] } {
+  private applyChanges(base: Record<string, string>, changes: Record<string, string>, exemptedFiles: Set<string> = new Set()): { merged: Record<string, string>, errors: string[] } {
     const result = { ...base };
     const errors: string[] = [];
 
@@ -371,20 +409,65 @@ export class AIController {
 
           // Check if the AI returned a unified diff patch format directly
           if (isUnifiedDiff) {
-            const patches = this.dmp.patch_fromText(newContent);
-            const [patchedText, results] = this.dmp.patch_apply(patches, base[path]);
-            
-            // Verify if patch was successful and conflict-free
-            const allSuccessful = results.every(Boolean);
-            if (allSuccessful && !patchedText.includes("<<<<<<<")) {
-              result[path] = patchedText;
-              console.log(`[Diff Engine] Successfully applied AI patch to ${path}`);
-            } else {
-              console.warn(`[Diff Engine] AI Patch failed or conflicted for ${path}, keeping old content.`);
-              errors.push(`Failed to apply patch for ${path}. The patch was rejected or conflicted. Please provide the FULL file content instead of a patch.`);
-              // Do not overwrite with raw patch text as it will break the file
-              result[path] = base[path];
+            try {
+              // Normalize the LLM-generated patch for diff-match-patch
+              const patchStartIndex = trimmed.indexOf('@@ ');
+              if (patchStartIndex === -1) throw new Error("No @@ block found");
+              
+              let rawPatchContent = trimmed.substring(patchStartIndex).replace(/\r\n/g, '\n');
+              // Strip trailing markdown backticks if present
+              rawPatchContent = rawPatchContent.trimEnd().replace(/```[a-z]*$/i, '').trimEnd();
+              
+              const formattedPatchLines = rawPatchContent.split('\n').map(line => {
+                if (line.startsWith('@@ ')) return line;
+                if (line.startsWith('\\')) return line;
+                
+                let sign = '';
+                let text = '';
+                
+                if (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) {
+                  sign = line[0];
+                  text = line.substring(1);
+                } else if (line === '') {
+                  sign = ' ';
+                  text = '';
+                } else {
+                  sign = ' ';
+                  text = line;
+                }
+                
+                // diff-match-patch expects the text part to be URI encoded
+                // We must encode it to prevent URIError on characters like '%'
+                return sign + encodeURI(text);
+              });
+              
+              const formattedPatch = formattedPatchLines.join('\n') + '\n';
+              
+              const patches = this.dmp.patch_fromText(formattedPatch);
+              const [patchedText, results] = this.dmp.patch_apply(patches, base[path]);
+              
+              // Verify if patch was successful and conflict-free
+              const allSuccessful = results.every(Boolean);
+              if (allSuccessful && !patchedText.includes("<<<<<<<")) {
+                result[path] = patchedText;
+                console.log(`[Diff Engine] Successfully applied AI patch to ${path}`);
+              } else {
+                console.warn(`[Diff Engine] AI Patch failed or conflicted for ${path}, keeping old content.`);
+                errors.push(`Failed to apply patch for ${path}. The patch was rejected or conflicted. Please ensure your patch context EXACTLY matches the original file, including indentation. Provide at least 3 lines of unchanged context before and after your changes.`);
+                // Do not overwrite with raw patch text as it will break the file
+                result[path] = base[path];
+              }
+            } catch (e: any) {
+              console.error(`[Diff Engine] Error applying patch to ${path}:`, e);
+              errors.push(`Failed to apply patch for ${path} due to a parsing error. Please ensure your unified diff patch is perfectly formatted.`);
+              result[path] = base[path]; // Fallback to keep old content
             }
+            continue;
+          }
+
+          const isAllowedFullFile = path === 'package.json' || path === 'metadata.json' || path === 'index.html' || exemptedFiles.has(path);
+          if (isAllowedFullFile) {
+            result[path] = newContent;
             continue;
           }
 
@@ -414,9 +497,9 @@ export class AIController {
             errors.push(`File ${path} was returned as a full file instead of a patch. This is not allowed for existing files.`);
             result[path] = base[path];
           }
-        } catch (e) {
+        } catch (e: any) {
           console.error(`[Diff Engine] Error applying changes to ${path}:`, e);
-          errors.push(`Failed to apply patch for ${path} due to a parsing error. Please provide the FULL file content instead of a patch.`);
+          errors.push(`Failed to apply patch for ${path} due to a parsing error. Please ensure your unified diff patch is perfectly formatted.`);
           result[path] = base[path]; // Fallback to keep old content
         }
       } else {
@@ -586,7 +669,7 @@ export class AIController {
         if (imp.startsWith('.')) {
           const resolved = this.resolveImportPath(path, imp, files);
           if (!resolved) {
-            errors.push(`Missing import target: "${imp}" in file "${path}"`);
+            errors.push(`Missing import target: "${imp}" in file "${path}". You MUST create this missing file in your response.`);
           }
         }
       }
