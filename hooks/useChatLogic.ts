@@ -265,8 +265,6 @@ INSTRUCTION: Analyze the test failures above. Fix the logic in the corresponding
       if (!isAuto) {
         if (res.questions && res.questions.length > 0) {
           setPhase(BuilderPhase.QUESTIONING);
-        } else if (res.files && Object.keys(res.files).length > 0) {
-          setPhase(BuilderPhase.BUILDING);
         }
       }
       

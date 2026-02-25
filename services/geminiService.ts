@@ -182,7 +182,7 @@ export class GeminiService {
 
   private async callPhaseWithOllama(model: string, system: string, prompt: string): Promise<any> {
     try {
-      const response = await fetch('http://localhost:11434/api/chat', {
+      const response = await fetch('http://127.0.0.1:11434/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -200,7 +200,7 @@ export class GeminiService {
       return JSON.parse(data.message.content);
     } catch (e: any) {
       console.error("[Ollama] Phase call failed:", e.message);
-      throw new Error(`Local model execution failed: ${e.message}. Ensure Ollama is running at http://localhost:11434`);
+      throw new Error(`Local model execution failed: ${e.message}. Ensure Ollama is running at http://127.0.0.1:11434 and OLLAMA_ORIGINS="*" is set.`);
     }
   }
 
@@ -255,21 +255,27 @@ export class GeminiService {
   }
 
   private async generateWithOllama(model: string, prompt: string, history: ChatMessage[]): Promise<GenerationResult> {
-    const response = await fetch('http://localhost:11434/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: `${BASE_ROLE}\n\n${DEEP_THINKING}\n\n${UNIT_TESTING}\n\n${DEPENDENCY_GRAPH}\n\n${SURGICAL_EDITING}\n\n${MANDATORY_RULES}\n\n${DESIGN_SYSTEM}\n\n${RESPONSE_FORMAT}` },
-          ...history.map(m => ({ role: m.role, content: m.content })),
-          { role: 'user', content: prompt }
-        ],
-        stream: false,
-        format: 'json'
-      })
-    });
-    const data = await response.json();
-    return JSON.parse(data.message.content);
+    try {
+      const response = await fetch('http://127.0.0.1:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: `${BASE_ROLE}\n\n${DEEP_THINKING}\n\n${UNIT_TESTING}\n\n${DEPENDENCY_GRAPH}\n\n${SURGICAL_EDITING}\n\n${MANDATORY_RULES}\n\n${DESIGN_SYSTEM}\n\n${RESPONSE_FORMAT}` },
+            ...history.map(m => ({ role: m.role, content: m.content })),
+            { role: 'user', content: prompt }
+          ],
+          stream: false,
+          format: 'json'
+        })
+      });
+      if (!response.ok) throw new Error(`Ollama error: ${response.statusText}`);
+      const data = await response.json();
+      return JSON.parse(data.message.content);
+    } catch (e: any) {
+      console.error("[Ollama] Direct call failed:", e.message);
+      throw new Error(`Local model execution failed: ${e.message}. Ensure Ollama is running at http://127.0.0.1:11434`);
+    }
   }
 }

@@ -262,6 +262,7 @@ export class AIController {
         }
 
         // 6. Success: Finalize Result
+        yield { type: 'status', phase: 'BUILDING', message: "Building application..." };
         yield { type: 'status', phase: 'PREVIEW_READY', message: "Finalizing build..." };
         finalResult = {
           files: generatedFiles,

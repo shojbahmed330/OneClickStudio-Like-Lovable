@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { CheckCircle2, Circle, Loader2, Brain, Code, FileText, Zap, Layout } from 'lucide-react';
+import { CheckCircle2, Circle, Loader2, Brain, Code, FileText, Zap, Layout, ShieldCheck } from 'lucide-react';
 import { BuilderPhase, BuilderStatus } from '../../../types';
 
 interface PhaseTimelineProps {
@@ -13,8 +13,11 @@ const PhaseTimeline: React.FC<PhaseTimelineProps> = ({ statuses, currentPhase })
     { id: BuilderPhase.PLANNING, label: 'Planning', icon: Brain },
     { id: BuilderPhase.CODING, label: 'Coding', icon: Code },
     { id: BuilderPhase.REVIEW, label: 'Review & Validation', icon: FileText },
+    { id: BuilderPhase.SECURITY, label: 'Security Audit', icon: ShieldCheck },
+    { id: BuilderPhase.PERFORMANCE, label: 'Performance Audit', icon: Zap },
+    { id: BuilderPhase.UIUX, label: 'UI/UX Polish', icon: Layout },
     { id: BuilderPhase.FIXING, label: 'Fixing Errors', icon: Zap },
-    { id: BuilderPhase.BUILDING, label: 'Finalizing Build', icon: Layout }
+    { id: BuilderPhase.BUILDING, label: 'Building Application', icon: Loader2 }
   ];
 
   const phaseOrder = [
