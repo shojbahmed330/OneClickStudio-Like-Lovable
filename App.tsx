@@ -1,13 +1,14 @@
 
-import React, { useState, useEffect, useRef } from 'react';
-import { AppMode, Project } from './types.ts';
-import { DatabaseService } from './services/dbService.ts';
+import React, { useRef } from 'react';
 import { LanguageProvider } from './i18n/LanguageContext.tsx';
 
 // Hook Imports
 import { useAppAuth } from './hooks/useAppAuth.ts';
 import { useAppLogic } from './hooks/useAppLogic.ts';
 import { usePaymentLogic } from './hooks/usePaymentLogic.ts';
+import { useNavigation } from './hooks/useNavigation.ts';
+import { useOnboarding } from './hooks/useOnboarding.ts';
+import { useLiveProject } from './hooks/useLiveProject.ts';
 
 // Navigation & Layout Imports
 import AppRouter from './navigation/AppRouter.tsx';
@@ -15,54 +16,14 @@ import OnboardingOverlay from './onboarding/OnboardingOverlay.tsx';
 import Toast from './dashboard/components/Toast.tsx';
 
 const AppContent: React.FC = () => {
-  const [path, setPath] = useState(window.location.pathname);
-  const [mode, setMode] = useState<AppMode>(AppMode.PREVIEW);
-  const [liveProject, setLiveProject] = useState<Project | null>(null);
-  const [liveLoading, setLiveLoading] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  const onboardingCheckedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const navigateTo = (newPath: string, newMode?: AppMode) => {
-    try { if (window.location.pathname !== newPath) window.history.pushState({}, '', newPath); } catch (e) {}
-    setPath(newPath);
-    if (newMode) setMode(newMode);
-  };
-
+  const { path, mode, setMode, navigateTo } = useNavigation();
   const { user, setUser, authLoading, showScan, setShowScan, handleLogout } = useAppAuth(navigateTo);
+  const { showOnboarding, handleOnboardingComplete } = useOnboarding(user);
+  const { liveProject, liveLoading } = useLiveProject(path);
+  
   const logic = useAppLogic(user, setUser);
   const payment = usePaymentLogic(user);
-  const db = DatabaseService.getInstance();
-
-  useEffect(() => {
-    const handlePopState = () => setPath(window.location.pathname);
-    window.addEventListener('popstate', handlePopState);
-    
-    if (path.startsWith('/preview/')) {
-      const id = path.split('/').pop();
-      if (id) {
-        setLiveLoading(true);
-        db.supabase.from('projects').select('*').eq('id', id).maybeSingle().then(({ data }) => {
-          if (data) setLiveProject(data);
-          setLiveLoading(false);
-        });
-      }
-    }
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, [path]);
-
-  useEffect(() => {
-    if (user && !onboardingCheckedRef.current) {
-      const isDone = localStorage.getItem(`onboarding_done_${user.id}`);
-      if (!isDone) setShowOnboarding(true);
-      onboardingCheckedRef.current = true;
-    }
-  }, [user]);
-
-  const handleOnboardingComplete = () => {
-    if (user) localStorage.setItem(`onboarding_done_${user.id}`, 'true');
-    setShowOnboarding(false);
-  };
 
   if (authLoading) {
     return (
