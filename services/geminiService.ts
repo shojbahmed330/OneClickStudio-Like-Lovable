@@ -139,12 +139,6 @@ export class GeminiService {
     input: string,
     modelName: string = 'gemini-3-flash-preview'
   ): Promise<any> {
-    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
-    if (!key || key === "undefined") throw new Error("GEMINI_API_KEY not found.");
-
-    const ai = new GoogleGenAI({ apiKey: key });
-    const model = modelName.includes('pro') ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview';
-
     let systemInstruction = '';
     switch (phase) {
       case 'planning': 
@@ -167,6 +161,16 @@ export class GeminiService {
         break;
     }
 
+    if (this.isLocalModel(modelName)) {
+      return this.callPhaseWithOllama(modelName, systemInstruction, input);
+    }
+
+    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!key || key === "undefined") throw new Error("GEMINI_API_KEY not found.");
+
+    const ai = new GoogleGenAI({ apiKey: key });
+    const model = modelName.includes('pro') ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview';
+
     const response = await ai.models.generateContent({
       model,
       contents: [{ parts: [{ text: input }] }],
@@ -174,6 +178,30 @@ export class GeminiService {
     });
 
     return JSON.parse(response.text || '{}');
+  }
+
+  private async callPhaseWithOllama(model: string, system: string, prompt: string): Promise<any> {
+    try {
+      const response = await fetch('http://localhost:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: prompt }
+          ],
+          stream: false,
+          format: 'json'
+        })
+      });
+      if (!response.ok) throw new Error(`Ollama error: ${response.statusText}`);
+      const data = await response.json();
+      return JSON.parse(data.message.content);
+    } catch (e: any) {
+      console.error("[Ollama] Phase call failed:", e.message);
+      throw new Error(`Local model execution failed: ${e.message}. Ensure Ollama is running at http://localhost:11434`);
+    }
   }
 
   async generateWebsite(
