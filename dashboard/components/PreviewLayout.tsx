@@ -28,6 +28,7 @@ const PreviewLayout: React.FC<PreviewLayoutProps> = ({ props }) => {
           executionQueue={props.executionQueue}
           waitingForApproval={props.waitingForApproval}
           phase={props.phase}
+          builderStatuses={props.builderStatuses}
         />
         <MobilePreview 
           projectFiles={props.previewOverride || props.projectFiles} 

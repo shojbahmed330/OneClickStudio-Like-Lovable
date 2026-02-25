@@ -2,8 +2,9 @@
 import React, { useEffect, useRef } from 'react';
 import { Loader2, RefreshCw, Cpu, Brain, Code, FileText, Save, Terminal, Zap, Clock, Layout, Palette, Type, Layers } from 'lucide-react';
 import MessageItem from './MessageItem';
+import PhaseTimeline from './PhaseTimeline';
 import { useLanguage } from '../../../i18n/LanguageContext';
-import { BuilderPhase } from '../../../types';
+import { BuilderPhase, BuilderStatus } from '../../../types';
 
 interface MessageListProps {
   messages: any[];
@@ -12,9 +13,10 @@ interface MessageListProps {
   handleSend: (extraData?: string) => void;
   waitingForApproval?: boolean;
   phase: BuilderPhase;
+  builderStatuses: BuilderStatus[];
 }
 
-const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, currentAction, handleSend, waitingForApproval, phase }) => {
+const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, currentAction, handleSend, waitingForApproval, phase, builderStatuses }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { t } = useLanguage();
 
@@ -43,6 +45,25 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, curre
       ref={scrollRef}
       className="flex-1 p-4 md:p-6 overflow-y-auto space-y-10 pt-24 lg:pt-6 pb-20 md:pb-48 scroll-smooth custom-scrollbar relative"
     >
+      {/* Top Status Bar */}
+      {isGenerating && (
+        <div className="sticky top-0 z-20 -mx-4 md:-mx-6 px-4 md:px-6 py-3 bg-[#09090b]/80 backdrop-blur-md border-b border-white/5 flex items-center justify-between animate-in fade-in slide-in-from-top-4 duration-300">
+          <div className="flex items-center gap-3">
+            <div className="w-2 h-2 rounded-full bg-pink-500 animate-pulse"></div>
+            <span className="text-[10px] md:text-[11px] font-bold text-white uppercase tracking-wider truncate max-w-[150px] md:max-w-none">
+              {currentAction || 'AI is working...'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest">
+              {phase}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {isGenerating && <PhaseTimeline statuses={builderStatuses} currentPhase={phase} />}
+
       {messages.map((m, idx) => (
         <MessageItem 
           key={m.id || idx} 

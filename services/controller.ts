@@ -140,13 +140,13 @@ export class AIController {
   /**
    * Main entry point for the AI Brain
    */
-  async processRequest(
+  async *processRequest(
     prompt: string,
     currentFiles: Record<string, string>,
     history: ChatMessage[] = [],
     activeWorkspace?: WorkspaceType | boolean,
     modelName: string = 'gemini-3-flash-preview'
-  ): Promise<GenerationResult> {
+  ): AsyncIterable<any> {
     
     const fileChanged = this.detectFileChanges(currentFiles);
     if (fileChanged) {
@@ -159,6 +159,7 @@ export class AIController {
     // 1. Mode Detection
     const mode = this.detectMode(prompt, currentFiles);
     console.log(`[Controller] Mode Detected: ${mode.toUpperCase()}`);
+    yield { type: 'status', phase: 'PLANNING', message: `Mode Detected: ${mode.toUpperCase()}` };
 
     const originalPromptHash = this.hashContent(prompt);
 
@@ -169,17 +170,32 @@ export class AIController {
       this.memory.lastResult
     ) {
       console.log("[Memory] No changes detected. Returning cached result.");
-      return this.memory.lastResult;
+      yield { type: 'status', phase: 'PREVIEW_READY', message: "No changes detected. Using cache." };
+      yield { type: 'result', ...this.memory.lastResult };
+      return;
     }
 
     // 2. Dependency Mapping (Memory Graph)
+    yield { type: 'status', phase: 'PLANNING', message: "Mapping dependencies..." };
     this.updateDependencyGraph(currentFiles);
 
     // 3. Orchestration Loop
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 5;
     let finalResult: GenerationResult | null = null;
     let failedPatchFiles = new Set<string>();
+
+    // 3.1 Pre-emptive Detection: If files are already broken, force full rewrite
+    yield { type: 'status', phase: 'PLANNING', message: "Checking for broken files..." };
+    const initialErrors = this.validateTypeScriptSyntax(currentFiles);
+    for (const err of initialErrors) {
+      const match = err.match(/TS Syntax Error in ([^:]+):/);
+      if (match && match[1]) {
+        const brokenFile = match[1].trim();
+        console.log(`[Controller] Pre-emptively forcing rewrite for broken file: ${brokenFile}`);
+        failedPatchFiles.add(brokenFile);
+      }
+    }
 
     while (attempts < maxAttempts) {
       try {
@@ -202,9 +218,14 @@ export class AIController {
           accumulatedApplyErrors.push(...errors);
           
           for (const err of errors) {
-            const match = err.match(/Failed to apply patch for ([^\s]+)/);
-            if (match && match[1]) {
-              failedPatchFiles.add(match[1]);
+            // Match both "Failed to apply patch for..." and "File ... was returned as a full file..."
+            const patchMatch = err.match(/Failed to apply patch for ([^\s:]+)/);
+            const fullFileMatch = err.match(/File ([^\s:]+) was returned as a full file/);
+            const target = (patchMatch && patchMatch[1]) || (fullFileMatch && fullFileMatch[1]);
+            if (target) {
+              const cleanedTarget = target.replace(/[,.]$/, '').trim();
+              console.log(`[Controller] Adding ${cleanedTarget} to failedPatchFiles for recovery.`);
+              failedPatchFiles.add(cleanedTarget);
             }
           }
           
@@ -212,7 +233,13 @@ export class AIController {
         };
 
         const isPatchMode = mode === GenerationMode.EDIT || mode === GenerationMode.FIX || mode === GenerationMode.OPTIMIZE;
-        const patchInstruction = isPatchMode ? "\nPATCH MODE (STRICT):\nIf a file already exists in the PROJECT MAP, you MUST return ONLY a unified diff patch.\nIf you return the full file content for an existing file, your response will be REJECTED.\n" : "";
+        let patchInstruction = "";
+        if (isPatchMode) {
+          patchInstruction = "\nPATCH MODE (STRICT):\nIf a file already exists in the PROJECT MAP, you MUST return ONLY a unified diff patch.\nIf you return the full file content for an existing file, your response will be REJECTED.\n";
+          if (failedPatchFiles.size > 0) {
+            patchInstruction += `\nEXCEPTION: For the following files, you MUST provide the FULL content (do not use patches):\n${Array.from(failedPatchFiles).join('\n')}\n`;
+          }
+        }
 
         const impactedFiles = this.analyzeImpact(currentPrompt);
         const impactInstruction = impactedFiles.length > 0
@@ -228,6 +255,7 @@ export class AIController {
 
         // Phase 1: Planning
         if (phases.includes("planning")) {
+          yield { type: 'status', phase: 'PLANNING', message: "Planning architecture..." };
           const planningPrompt = currentPrompt + impactInstruction;
           const input = this.buildPhaseInput('planning', planningPrompt, currentContextFiles, activeWorkspace);
           const plan = await this.executePhaseWithCache('planning', input, modelName);
@@ -237,6 +265,7 @@ export class AIController {
 
         // Phase 2: Coding (Developer)
         if (phases.includes("coding")) {
+          yield { type: 'status', phase: 'CODING', message: "Generating code..." };
           const codingPrompt = currentPrompt + enforceInstruction;
           const input = mode === GenerationMode.SCAFFOLD 
             ? `PLAN:\n${JSON.stringify(finalPlan)}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
@@ -249,6 +278,7 @@ export class AIController {
 
         // Phase 3: Review
         if (phases.includes("review")) {
+          yield { type: 'status', phase: 'REVIEW', message: "Reviewing implementation..." };
           const reviewPrompt = currentPrompt + enforceInstruction;
           const input = mode === GenerationMode.FIX
             ? `USER REQUEST (FIX ERROR):\n${reviewPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
@@ -261,6 +291,7 @@ export class AIController {
 
         // Phase 4: Security
         if (phases.includes("security")) {
+          yield { type: 'status', phase: 'SECURITY', message: "Security audit..." };
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE SECURITY):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
             : `FILES TO SECURE:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
@@ -272,6 +303,7 @@ export class AIController {
 
         // Phase 5: Performance
         if (phases.includes("performance")) {
+          yield { type: 'status', phase: 'PERFORMANCE', message: "Performance audit..." };
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE PERFORMANCE):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
             : `FILES TO AUDIT:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
@@ -282,6 +314,7 @@ export class AIController {
 
         // Phase 6: UI/UX
         if (phases.includes("uiux")) {
+          yield { type: 'status', phase: 'UIUX', message: "UI/UX polish..." };
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE UI/UX):\n${currentPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`
             : `FILES TO POLISH:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, currentPrompt)}`;
@@ -293,7 +326,11 @@ export class AIController {
         // 3.5 Patch Enforcement Check
         const patchViolations = this.enforcePatchRules(generatedFiles, currentFiles, failedPatchFiles);
         if (patchViolations.length > 0) {
+          yield { type: 'status', phase: 'FIXING', message: "Fixing patch violations..." };
           console.warn(`[Controller] Patch violation detected for:`, patchViolations);
+          for (const v of patchViolations) {
+            failedPatchFiles.add(v);
+          }
           const violationMsg = `Patch violation detected for:\n${patchViolations.join('\n')}\n\nThese files already exist. You MUST return unified diff patches for them. Do NOT return the full file.`;
           prompt += `\n\nIMPORTANT: ${violationMsg}`;
           attempts++;
@@ -308,6 +345,7 @@ export class AIController {
         this.updateDependencyGraph(mergedFiles);
 
         // 5. Runtime Validation (Sanity Check)
+        yield { type: 'status', phase: 'REVIEW', message: "Validating code..." };
         // Validate the final merged content of the files that were touched
         const changedFilesToValidate: Record<string, string> = {};
         for (const [path, content] of Object.entries(mergedFiles)) {
@@ -328,41 +366,44 @@ export class AIController {
           }
         }
 
-        if (validationErrors.length === 0) {
-          finalResult = {
-            thought: thoughts.join('\n\n'),
-            plan: finalPlan,
-            answer: finalAnswer,
-            files: mergedFiles,
-            mode
-          };
-
-          // Update Memory Snapshot
-          this.updateSnapshot(mergedFiles);
-          this.memory.dependencyGraphSnapshot = JSON.parse(JSON.stringify(this.dependencyGraph));
-          this.memory.lastPromptHash = originalPromptHash;
-          this.memory.lastMode = mode;
-          this.memory.lastResult = finalResult;
-
-          break; 
+        if (validationErrors.length > 0) {
+          yield { type: 'status', phase: 'FIXING', message: `Fixing ${validationErrors.length} errors...` };
+          yield { type: 'validation_errors', errors: validationErrors };
+          console.warn(`[Controller] Validation failed (Attempt ${attempts + 1}):`, validationErrors);
+          prompt += `\n\n🚨 VALIDATION FAILED (Attempt ${attempts + 1}):\n${validationErrors.join('\n')}\n\nPlease fix these errors in your next response.`;
+          attempts++;
+          continue;
         }
 
-        console.warn(`[Controller] Validation failed (Attempt ${attempts + 1}):`, validationErrors);
-        prompt += `\n\nIMPORTANT: Your previous output had validation errors. Please fix them:\n${validationErrors.join('\n')}`;
+        // 6. Success: Finalize Result
+        yield { type: 'status', phase: 'PREVIEW_READY', message: "Finalizing build..." };
+        finalResult = {
+          files: generatedFiles,
+          answer: finalAnswer,
+          thought: thoughts.join('\n\n'),
+          plan: finalPlan,
+          mode
+        };
+
+        this.memory.lastPromptHash = originalPromptHash;
+        this.memory.lastMode = mode;
+        this.memory.lastResult = finalResult;
+        this.updateSnapshot(mergedFiles);
+
+        yield { type: 'result', ...finalResult };
+        return;
+
+      } catch (error: any) {
+        console.error(`[Controller] Generation error:`, error.message);
         attempts++;
-      } catch (error) {
-        console.error(`[Controller] Generation error:`, error);
-        attempts++;
+        if (attempts >= maxAttempts) throw error;
+        yield { type: 'status', phase: 'FIXING', message: `Retrying after error: ${error.message}` };
       }
     }
 
-    if (!finalResult) throw new Error("Failed to generate code after multiple attempts.");
-    return finalResult;
+    throw new Error("Failed to generate code after multiple attempts.");
   }
 
-  /**
-   * Streaming entry point for the AI Brain
-   */
   async *processRequestStream(
     prompt: string,
     currentFiles: Record<string, string>,
@@ -371,8 +412,10 @@ export class AIController {
     modelName: string = 'gemini-3-flash-preview'
   ): AsyncIterable<string> {
     try {
-      const result = await this.processRequest(prompt, currentFiles, history, activeWorkspace, modelName);
-      yield JSON.stringify(result);
+      const generator = this.processRequest(prompt, currentFiles, history, activeWorkspace, modelName);
+      for await (const update of generator) {
+        yield JSON.stringify(update) + "\n";
+      }
     } catch (error: any) {
       throw error;
     }

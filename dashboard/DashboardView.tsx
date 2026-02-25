@@ -32,6 +32,7 @@ interface DashboardViewProps {
   setProjectConfig: (config: ProjectConfig) => void;
   projectId?: string | null;
   phase: BuilderPhase;
+  builderStatuses: any[];
   runtimeError: { message: string; line: number; source: string } | null;
   isRepairing: boolean;
   repairSuccess: boolean;

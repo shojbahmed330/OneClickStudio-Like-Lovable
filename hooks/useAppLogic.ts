@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { User as UserType, ProjectConfig, Project, WorkspaceType, BuildStep, GithubConfig, ChatMessage, AIModel, BuilderPhase } from '../types';
+import { User as UserType, ProjectConfig, Project, WorkspaceType, BuildStep, GithubConfig, ChatMessage, AIModel, BuilderPhase, BuilderStatus } from '../types';
 import { AIController } from '../services/controller';
 import { DatabaseService } from '../services/dbService';
 import { GithubService } from '../services/githubService';
@@ -34,6 +34,7 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [phase, setPhase] = useState<BuilderPhase>(BuilderPhase.EMPTY);
+  const [builderStatuses, setBuilderStatuses] = useState<BuilderStatus[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentAction, setCurrentAction] = useState<string | null>(null);
   const [executionQueue, setExecutionQueue] = useState<string[]>([]);
@@ -209,6 +210,7 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
 
     setIsGenerating(true);
     setCurrentAction("Engineering Node...");
+    setBuilderStatuses([]);
     abortControllerRef.current = new AbortController();
     
     try {
@@ -229,11 +231,17 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
       }
 
       const assistantId = (Date.now() + 1).toString();
-      setMessages(prev => [...prev, { id: assistantId, role: 'assistant', content: '', timestamp: Date.now(), model: currentModel }]);
+      const originalFiles = { ...projectFilesRef.current };
+      setMessages(prev => [...prev, { 
+        id: assistantId, 
+        role: 'assistant', 
+        content: '', 
+        timestamp: Date.now(), 
+        model: currentModel,
+        validationErrors: [],
+        originalFiles: originalFiles
+      }]);
 
-      let fullJsonString = '';
-      let streamedAnswer = '';
-      
       // Capture current state of files for the stream
       const currentFiles = { ...projectFilesRef.current };
       // Capture current messages for the stream (including the one we just added if not auto)
@@ -256,36 +264,41 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
         currentModel
       );
 
+      let finalRes: any = null;
+
       for await (const chunk of stream) {
-        fullJsonString += chunk;
-        
-        // Extract thought for real-time status
-        const thoughtMatch = fullJsonString.match(/"thought":\s*"([^"]*)"/);
-        if (thoughtMatch && thoughtMatch[1]) {
-          const currentThought = thoughtMatch[1].replace(/\\n/g, '\n');
-          setCurrentAction(currentThought);
-          setLastThought(currentThought);
-        }
-
-        // Extract answer for real-time message content
-        const answerMatch = fullJsonString.match(/"answer":\s*"([^"]*)"/);
-        if (answerMatch && answerMatch[1]) {
-          const currentAnswerPart = answerMatch[1].replace(/\\n/g, '\n');
-          if (currentAnswerPart !== streamedAnswer) {
-            streamedAnswer = currentAnswerPart;
-            setMessages(prev => prev.map(m => m.id === assistantId ? { ...m, content: streamedAnswer } : m));
+        const lines = chunk.split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          try {
+            const update = JSON.parse(line);
+            if (update.type === 'status') {
+              setPhase(update.phase);
+              setCurrentAction(update.message);
+              setBuilderStatuses(prev => {
+                // Mark previous as completed
+                const updated = prev.map(s => ({ ...s, isCompleted: true }));
+                // Add new status if not already there for this phase
+                if (!updated.find(s => s.phase === update.phase && s.message === update.message)) {
+                  return [...updated, { phase: update.phase, message: update.message, timestamp: Date.now(), isCompleted: false }];
+                }
+                return updated;
+              });
+            } else if (update.type === 'validation_errors') {
+              setMessages(prev => prev.map(m => m.id === assistantId ? { 
+                ...m, 
+                validationErrors: [...(m.validationErrors || []), ...update.errors] 
+              } : m));
+            } else if (update.type === 'result') {
+              finalRes = update;
+            }
+          } catch (e) {
+            console.warn("Failed to parse stream chunk:", line);
           }
-        }
-
-        // Fallback status updates if thought is not yet available
-        if (!thoughtMatch) {
-          if (fullJsonString.includes('"answer":')) setCurrentAction("Drafting Implementation...");
-          else if (fullJsonString.includes('"files":')) setCurrentAction("Writing Production Code...");
-          else if (fullJsonString.includes('"questions":')) setCurrentAction("Analyzing Requirements...");
         }
       }
 
-      const res = JSON.parse(fullJsonString);
+      if (!finalRes) throw new Error("No result received from AI.");
+      const res = finalRes;
       if (res.thought) setLastThought(res.thought);
 
       // Phase Logic based on AI response
@@ -627,7 +640,7 @@ INSTRUCTION: Analyze the test failures above. Fix the logic in the corresponding
     projectFiles, setProjectFiles, 
     projectConfig, setProjectConfig, selectedFile, setSelectedFile,
     openTabs, toasts, addToast, removeToast: (id: string) => setToasts(prev => prev.filter(t => t.id !== id)),
-    lastThought, currentPlan, phase, setPhase,
+    lastThought, currentPlan, phase, setPhase, builderStatuses,
     buildStatus, setBuildStatus, buildSteps, isDownloading, selectedImage,
     setSelectedImage, handleImageSelect, history, isHistoryLoading, showHistory,
     setShowHistory, handleRollback, previewOverride, setPreviewOverride,

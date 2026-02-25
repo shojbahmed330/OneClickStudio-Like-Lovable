@@ -20,12 +20,13 @@ interface ChatBoxProps {
   executionQueue: string[];
   waitingForApproval?: boolean;
   phase: BuilderPhase;
+  builderStatuses: any[];
 }
 
 const ChatBox: React.FC<ChatBoxProps> = ({ 
   messages, input, setInput, isGenerating, currentAction, handleSend, handleStop, mobileTab,
   selectedImage, setSelectedImage, handleImageSelect, executionQueue,
-  waitingForApproval, phase
+  waitingForApproval, phase, builderStatuses
 }) => {
   return (
     <section className={`w-full lg:w-[500px] xl:w-[560px] border-r border-white/5 flex flex-col bg-[#09090b] h-full relative transition-all duration-700 ${mobileTab === 'preview' ? 'hidden lg:flex' : 'flex'}`}>
@@ -38,6 +39,7 @@ const ChatBox: React.FC<ChatBoxProps> = ({
             handleSend={handleSend} 
             waitingForApproval={waitingForApproval}
             phase={phase}
+            builderStatuses={builderStatuses}
           />
         ) : (
           <div className="flex-1 overflow-y-auto">

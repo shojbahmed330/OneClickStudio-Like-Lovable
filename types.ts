@@ -39,10 +39,25 @@ export enum AppMode {
 export enum BuilderPhase {
   EMPTY = 'EMPTY',
   PROMPT_SENT = 'PROMPT_SENT',
-  QUESTIONING = 'QUESTIONING',
+  PLANNING = 'PLANNING',
+  CODING = 'CODING',
+  REVIEW = 'REVIEW',
+  SECURITY = 'SECURITY',
+  PERFORMANCE = 'PERFORMANCE',
+  UIUX = 'UIUX',
+  FIXING = 'FIXING',
   BUILDING = 'BUILDING',
+  REBUILDING = 'REBUILDING',
+  QUESTIONING = 'QUESTIONING',
   PREVIEW_READY = 'PREVIEW_READY',
   ITERATION = 'ITERATION'
+}
+
+export interface BuilderStatus {
+  phase: BuilderPhase;
+  message: string;
+  timestamp: number;
+  isCompleted?: boolean;
 }
 
 export type WorkspaceType = 'app' | 'admin';
