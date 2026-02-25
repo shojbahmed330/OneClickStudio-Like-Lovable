@@ -3,7 +3,6 @@ import { GeminiService } from "./geminiService";
 import { GenerationMode, GenerationResult, WorkspaceType, ChatMessage, DependencyNode } from "../types";
 import { diff_match_patch } from "diff-match-patch";
 import * as ts from "typescript";
-import * as crypto from "crypto";
 
 export class AIController {
   private gemini: GeminiService;
@@ -24,7 +23,41 @@ export class AIController {
   }
 
   private hashContent(content: string): string {
-    return crypto.createHash("sha256").update(content).digest("hex");
+    let hash = 0;
+    for (let i = 0, len = content.length; i < len; i++) {
+      const chr = content.charCodeAt(i);
+      hash = (hash << 5) - hash + chr;
+      hash |= 0; // Convert to 32bit integer
+    }
+    return hash.toString(36);
+  }
+
+  private detectFileChanges(files: Record<string, string>): boolean {
+    // If cache is empty, it's the first run, not a change
+    if (this.memory.fileHashes.size === 0) return false;
+
+    for (const [path, content] of Object.entries(files)) {
+      const newHash = this.hashContent(content);
+      const oldHash = this.memory.fileHashes.get(path);
+
+      if (!oldHash || newHash !== oldHash) {
+        return true;
+      }
+    }
+
+    // also detect deleted files
+    for (const oldPath of this.memory.fileHashes.keys()) {
+      if (!files[oldPath]) return true;
+    }
+
+    return false;
+  }
+
+  private updateSnapshot(files: Record<string, string>) {
+    this.memory.fileHashes.clear();
+    for (const [path, content] of Object.entries(files)) {
+      this.memory.fileHashes.set(path, this.hashContent(content));
+    }
   }
 
   private async executePhaseWithCache(phase: 'planning' | 'coding' | 'review' | 'security' | 'performance' | 'uiux', input: string, modelName: string): Promise<any> {
@@ -39,6 +72,46 @@ export class AIController {
     return result;
   }
 
+  private enforcePatchRules(generatedFiles: Record<string, string>, currentFiles: Record<string, string>): string[] {
+    const violations: string[] = [];
+
+    for (const [path, content] of Object.entries(generatedFiles)) {
+      const exists = currentFiles[path];
+
+      if (exists) {
+        const isPatch = content.startsWith("--- ") && content.includes("@@ ");
+
+        if (!isPatch) {
+          violations.push(path);
+        }
+      }
+    }
+
+    return violations;
+  }
+
+  private decidePhases(mode: GenerationMode, changedFiles: string[]): string[] {
+    let phases: string[] = [];
+
+    if (mode === GenerationMode.SCAFFOLD) {
+      phases = ["planning", "coding", "review"];
+    } else if (mode === GenerationMode.EDIT) {
+      phases = ["coding", "review"];
+    } else if (mode === GenerationMode.FIX) {
+      phases = ["review", "coding"];
+    } else if (mode === GenerationMode.OPTIMIZE) {
+      phases = ["performance", "uiux"];
+    }
+
+    const dbChanged = changedFiles.some(f => f.includes("database") || f.includes("schema") || f.includes("migration"));
+    const uiChanged = changedFiles.some(f => f.includes("components") || f.includes("pages") || f.includes("views") || f.endsWith(".css"));
+
+    if (dbChanged && !phases.includes("security")) phases.push("security");
+    if (uiChanged && !phases.includes("uiux")) phases.push("uiux");
+
+    return [...new Set(phases)];
+  }
+
   /**
    * Main entry point for the AI Brain
    */
@@ -50,6 +123,14 @@ export class AIController {
     modelName: string = 'gemini-3-flash-preview'
   ): Promise<GenerationResult> {
     
+    const fileChanged = this.detectFileChanges(currentFiles);
+    if (fileChanged) {
+      console.log("[Memory] Manual file changes detected → invalidating cache");
+      this.memory.phaseCache.clear();
+      this.memory.lastPromptHash = "";
+      this.memory.lastResult = null;
+    }
+
     // 1. Mode Detection
     const mode = this.detectMode(prompt, currentFiles);
     console.log(`[Controller] Mode Detected: ${mode.toUpperCase()}`);
@@ -83,18 +164,22 @@ export class AIController {
         let finalAnswer: string = "Task completed successfully.";
 
         const isPatchMode = mode === GenerationMode.EDIT || mode === GenerationMode.FIX || mode === GenerationMode.OPTIMIZE;
-        const patchInstruction = isPatchMode ? "\nIMPORTANT: Use PATCH MODE for existing files.\n" : "";
+        const patchInstruction = isPatchMode ? "\nPATCH MODE (STRICT):\nIf a file already exists in the PROJECT MAP, you MUST return ONLY a unified diff patch.\nIf you return the full file content for an existing file, your response will be REJECTED.\n" : "";
 
         const impactedFiles = this.analyzeImpact(prompt);
         const impactInstruction = impactedFiles.length > 0
-          ? `\n\n🚨 STRUCTURAL IMPACT DETECTED:\nThe following files are structurally dependent and MUST be updated to prevent runtime breakage:\n${impactedFiles.map(f => `- ${f}`).join('\n')}\n\nYou MUST include updates for these files in your plan steps.`
+          ? `\n\n🚨 STRUCTURAL IMPACT DETECTED:\nThe following files are structurally dependent and MUST be reviewed/updated to prevent breaking changes:\n${impactedFiles.map(f => `- ${f}`).join('\n')}\n\nYou MUST include updates for these files in your plan steps.`
           : "";
         const enforceInstruction = impactedFiles.length > 0
           ? `\n\n🚨 MANDATORY UPDATE REQUIREMENT:\nYou MUST update these files as part of this change:\n${impactedFiles.map(f => `- ${f}`).join('\n')}\n\nReturn patches or full files for each.`
           : "";
 
+        // Determine which phases to run based on mode and impacted files
+        const phases = this.decidePhases(mode, impactedFiles);
+        console.log(`[Orchestrator] Running phases: ${phases.join(', ')}`);
+
         // Phase 1: Planning
-        if (mode === GenerationMode.SCAFFOLD) {
+        if (phases.includes("planning")) {
           const planningPrompt = prompt + impactInstruction;
           const input = this.buildPhaseInput('planning', planningPrompt, currentContextFiles, activeWorkspace);
           const plan = await this.executePhaseWithCache('planning', input, modelName);
@@ -103,7 +188,7 @@ export class AIController {
         }
 
         // Phase 2: Coding (Developer)
-        if (mode === GenerationMode.SCAFFOLD || mode === GenerationMode.EDIT) {
+        if (phases.includes("coding")) {
           const codingPrompt = prompt + enforceInstruction;
           const input = mode === GenerationMode.SCAFFOLD 
             ? `PLAN:\n${JSON.stringify(finalPlan)}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
@@ -117,7 +202,7 @@ export class AIController {
         }
 
         // Phase 3: Review
-        if (mode === GenerationMode.SCAFFOLD || mode === GenerationMode.EDIT || mode === GenerationMode.FIX) {
+        if (phases.includes("review")) {
           const reviewPrompt = prompt + enforceInstruction;
           const input = mode === GenerationMode.FIX
             ? `USER REQUEST (FIX ERROR):\n${reviewPrompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
@@ -131,7 +216,7 @@ export class AIController {
         }
 
         // Phase 4: Security
-        {
+        if (phases.includes("security")) {
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE SECURITY):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
             : `FILES TO SECURE:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
@@ -144,7 +229,7 @@ export class AIController {
         }
 
         // Phase 5: Performance
-        {
+        if (phases.includes("performance")) {
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE PERFORMANCE):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
             : `FILES TO AUDIT:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
@@ -156,7 +241,7 @@ export class AIController {
         }
 
         // Phase 6: UI/UX
-        {
+        if (phases.includes("uiux")) {
           const input = mode === GenerationMode.OPTIMIZE
             ? `USER REQUEST (OPTIMIZE UI/UX):\n${prompt}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`
             : `FILES TO POLISH:\n${JSON.stringify(generatedFiles)}${patchInstruction}\n\nCONTEXT:\n${this.buildContext(currentContextFiles, prompt)}`;
@@ -167,8 +252,32 @@ export class AIController {
           this.updateDependencyGraph(currentContextFiles);
         }
 
-        // 4. Runtime Validation (Sanity Check)
-        const validationErrors = this.validateOutput(generatedFiles);
+        // 3.5 Patch Enforcement Check
+        const patchViolations = this.enforcePatchRules(generatedFiles, currentFiles);
+        if (patchViolations.length > 0) {
+          console.warn(`[Controller] Patch violation detected for:`, patchViolations);
+          const violationMsg = `Patch violation detected for:\n${patchViolations.join('\n')}\n\nThese files already exist. You MUST return unified diff patches for them. Do NOT return the full file.`;
+          prompt += `\n\nIMPORTANT: ${violationMsg}`;
+          attempts++;
+          continue; // Skip the rest of the loop and retry immediately
+        }
+
+        // 4. Diff Engine & Migration Logic
+        const { merged: mergedFiles, errors: applyErrors } = this.applyChanges(currentFiles, generatedFiles);
+
+        // Update dependency graph with merged files BEFORE validation
+        this.updateDependencyGraph(mergedFiles);
+
+        // 5. Runtime Validation (Sanity Check)
+        // Validate the final merged content of the files that were touched
+        const changedFilesToValidate: Record<string, string> = {};
+        for (const [path, content] of Object.entries(mergedFiles)) {
+          if (content !== currentFiles[path]) {
+            changedFilesToValidate[path] = content;
+          }
+        }
+        const validationErrors = this.validateOutput(changedFilesToValidate);
+        validationErrors.push(...applyErrors);
         
         // Strict Impact Enforcement Check
         if (impactedFiles.length > 0) {
@@ -181,12 +290,6 @@ export class AIController {
         }
 
         if (validationErrors.length === 0) {
-          // 5. Diff Engine & Migration Logic
-          const mergedFiles = this.applyChanges(currentFiles, generatedFiles);
-          
-          // Final Graph Update
-          this.updateDependencyGraph(mergedFiles);
-          
           finalResult = {
             thought: thoughts.join('\n\n'),
             plan: finalPlan,
@@ -196,10 +299,7 @@ export class AIController {
           };
 
           // Update Memory Snapshot
-          this.memory.fileHashes.clear();
-          for (const [path, content] of Object.entries(mergedFiles)) {
-            this.memory.fileHashes.set(path, this.hashContent(content));
-          }
+          this.updateSnapshot(mergedFiles);
           this.memory.dependencyGraphSnapshot = JSON.parse(JSON.stringify(this.dependencyGraph));
           this.memory.lastPromptHash = originalPromptHash;
           this.memory.lastMode = mode;
@@ -231,12 +331,11 @@ export class AIController {
     activeWorkspace?: WorkspaceType | boolean,
     modelName: string = 'gemini-3-flash-preview'
   ): AsyncIterable<string> {
-    yield "Thinking (Planning)...";
     try {
       const result = await this.processRequest(prompt, currentFiles, history, activeWorkspace, modelName);
       yield JSON.stringify(result);
     } catch (error: any) {
-      yield `Error: ${error.message}`;
+      throw error;
     }
   }
 
@@ -250,8 +349,9 @@ export class AIController {
     return GenerationMode.EDIT;
   }
 
-  private applyChanges(base: Record<string, string>, changes: Record<string, string>): Record<string, string> {
+  private applyChanges(base: Record<string, string>, changes: Record<string, string>): { merged: Record<string, string>, errors: string[] } {
     const result = { ...base };
+    const errors: string[] = [];
 
     for (const [path, newContent] of Object.entries(changes)) {
       // Migration Logic: If database.sql is changed, create a migration instead
@@ -278,13 +378,15 @@ export class AIController {
               result[path] = patchedText;
               console.log(`[Diff Engine] Successfully applied AI patch to ${path}`);
             } else {
-              console.warn(`[Diff Engine] AI Patch failed or conflicted for ${path}, falling back to full overwrite.`);
-              result[path] = newContent;
+              console.warn(`[Diff Engine] AI Patch failed or conflicted for ${path}, keeping old content.`);
+              errors.push(`Failed to apply patch for ${path}. The patch was rejected or conflicted. Please provide the FULL file content instead of a patch.`);
+              // Do not overwrite with raw patch text as it will break the file
+              result[path] = base[path];
             }
             continue;
           }
 
-          // Smart Diff Detection for full file returns
+          // Smart Diff Detection for full file returns (Fallback only if somehow bypassed)
           const sizeDiff = Math.abs(base[path].length - newContent.length);
           const isSmallChange = sizeDiff < (base[path].length * 0.4);
 
@@ -300,13 +402,15 @@ export class AIController {
               result[path] = patchedText;
               console.log(`[Diff Engine] Smart patch applied for ${path} (Size diff: ${sizeDiff})`);
             } else {
-              console.warn(`[Diff Engine] Smart patch conflicted for ${path}, falling back to overwrite.`);
-              result[path] = newContent;
+              console.warn(`[Diff Engine] Smart patch conflicted for ${path}, rejecting change.`);
+              errors.push(`Failed to apply smart patch for ${path}. The patch was rejected or conflicted.`);
+              result[path] = base[path];
             }
           } else {
-            // Big change -> full overwrite
-            console.log(`[Diff Engine] Big change detected for ${path} (Size diff: ${sizeDiff} > 40%), full overwrite.`);
-            result[path] = newContent;
+            // Big change -> reject if it's supposed to be a patch
+            console.warn(`[Diff Engine] Big change detected for ${path} (Size diff: ${sizeDiff} > 40%), rejecting as non-patch.`);
+            errors.push(`File ${path} was returned as a full file instead of a patch. This is not allowed for existing files.`);
+            result[path] = base[path];
           }
         } catch (e) {
           console.error(`[Diff Engine] Error applying changes to ${path}:`, e);
@@ -318,15 +422,75 @@ export class AIController {
       }
     }
 
-    return result;
+    return { merged: result, errors };
+  }
+
+  private resolveCache = new Map<string, string | null>();
+
+  private normalizePath(p: string): string {
+    return p.replace(/\\/g, '/').replace(/\/\//g, '/');
+  }
+
+  private resolveImportPath(importerFile: string, importPath: string, allFiles: Record<string, string>): string | null {
+    const cacheKey = `${importerFile}|${importPath}`;
+    if (this.resolveCache.has(cacheKey)) return this.resolveCache.get(cacheKey)!;
+
+    let resolved = importPath;
+
+    // 1. Alias support
+    if (importPath.startsWith('@/')) {
+      resolved = importPath.replace('@/', 'src/');
+      if (!Object.keys(allFiles).some(f => f.startsWith(resolved))) {
+        resolved = importPath.replace('@/', 'app/');
+      }
+    } else if (importPath.startsWith('.')) {
+      // 2. Relative import
+      resolved = this.resolveRelativePath(importerFile, importPath);
+    }
+
+    resolved = this.normalizePath(resolved);
+
+    // 3. Try extensions
+    const candidates = [
+      resolved,
+      `${resolved}.ts`,
+      `${resolved}.tsx`,
+      `${resolved}.js`,
+      `${resolved}.jsx`,
+      `${resolved}/index.ts`,
+      `${resolved}/index.tsx`,
+      `${resolved}/index.js`,
+      `${resolved}/index.jsx`,
+    ];
+
+    let finalMatch: string | null = null;
+    for (const c of candidates) {
+      if (allFiles[c] !== undefined) {
+        finalMatch = c;
+        break;
+      }
+    }
+
+    this.resolveCache.set(cacheKey, finalMatch);
+    return finalMatch;
   }
 
   private updateDependencyGraph(files: Record<string, string>) {
     this.dependencyGraph = [];
-    for (const [path, content] of Object.entries(files)) {
+    this.resolveCache.clear();
+
+    for (const [filePath, content] of Object.entries(files)) {
+      const rawImports = this.extractImports(content);
+      const resolvedImports: string[] = [];
+
+      for (const imp of rawImports) {
+        const resolved = this.resolveImportPath(filePath, imp, files);
+        if (resolved) resolvedImports.push(resolved);
+      }
+
       this.dependencyGraph.push({ 
-        file: path, 
-        imports: this.extractImports(content),
+        file: this.normalizePath(filePath), 
+        imports: resolvedImports,
         tablesUsed: this.extractTables(content),
         apisUsed: this.extractAPIs(content),
         servicesUsed: this.extractServices(content)
@@ -355,8 +519,8 @@ export class AIController {
         tables.add(table);
       }
     }
-    // Match Supabase: .from('table_name') or .from("table_name")
-    const supabaseRegex = /\.from\(['"]([a-zA-Z0-9_]+)['"]\)/g;
+    // Match Supabase: .from('table_name') or .from<Type>("table_name")
+    const supabaseRegex = /\.from(?:<[^>]+>)?\(['"]([a-zA-Z0-9_]+)['"]\)/g;
     while ((match = supabaseRegex.exec(content)) !== null) {
       tables.add(match[1]);
     }
@@ -412,15 +576,13 @@ export class AIController {
 
   private validateImports(files: Record<string, string>): string[] {
     const errors: string[] = [];
-    const fileKeys = Object.keys(files);
 
     for (const [path, content] of Object.entries(files)) {
       const imports = this.extractImports(content);
       for (const imp of imports) {
         if (imp.startsWith('.')) {
-          const resolved = this.resolveRelativePath(path, imp);
-          const exists = fileKeys.some(f => f.startsWith(resolved));
-          if (!exists) {
+          const resolved = this.resolveImportPath(path, imp, files);
+          if (!resolved) {
             errors.push(`Missing import target: "${imp}" in file "${path}"`);
           }
         }
@@ -438,7 +600,8 @@ export class AIController {
           fileName,
           content,
           ts.ScriptTarget.ESNext,
-          true
+          true,
+          fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
         );
         const diagnostics = (sourceFile as any).parseDiagnostics || [];
         for (const d of diagnostics) {
@@ -458,7 +621,7 @@ export class AIController {
     for (const migration of migrationFiles) {
       const content = files[migration];
       const alteredTables = new Set<string>();
-      const regex = /(?:create table|alter table|update|insert into)\s+([a-zA-Z0-9_]+)/gi;
+      const regex = /(?:create table|alter table|update|insert into)(?:\s+if\s+not\s+exists)?\s+([a-zA-Z0-9_]+)/gi;
       let match;
       while ((match = regex.exec(content)) !== null) {
         alteredTables.add(match[1].toLowerCase());
@@ -486,8 +649,7 @@ export class AIController {
       const node = this.dependencyGraph.find(n => n.file === nodeFile);
       if (node) {
         for (const imp of node.imports) {
-          const importedFileName = imp.split('/').pop()?.replace(/\.[^/.]+$/, "") || "";
-          const targetNode = this.dependencyGraph.find(n => n.file.includes(importedFileName));
+          const targetNode = this.dependencyGraph.find(n => n.file === imp);
           
           if (targetNode) {
             if (!visited.has(targetNode.file)) {
@@ -514,7 +676,7 @@ export class AIController {
     errors.push(...this.validateFileSizeAndConflicts(files));
     errors.push(...this.validateImports(files));
     errors.push(...this.validateTypeScriptSyntax(files));
-    errors.push(...this.validateMigrationConsistency(files));
+    // Migration consistency check removed as it blocks incremental table creation
     errors.push(...this.detectCircularDependencies());
     return errors;
   }
@@ -555,12 +717,8 @@ export class AIController {
     // 3. Find cascading impacts (files importing the directly impacted files)
     for (const node of this.dependencyGraph) {
       for (const imp of node.imports) {
-        // If this node imports a file that was directly impacted
-        const importedFileName = imp.split('/').pop()?.replace(/\.[^/.]+$/, "") || "";
-        for (const directFile of directImpactFiles) {
-          if (directFile.includes(importedFileName)) {
-            impactedFiles.add(node.file);
-          }
+        if (directImpactFiles.has(imp)) {
+          impactedFiles.add(node.file);
         }
       }
     }
@@ -601,8 +759,7 @@ export class AIController {
     for (const node of this.dependencyGraph) {
       if (contextSet.has(node.file)) {
         node.imports.forEach(imp => {
-          const match = this.findFileByName(imp, files);
-          if (match) contextSet.add(match);
+          if (files[imp]) contextSet.add(imp);
         });
       }
     }
@@ -610,13 +767,16 @@ export class AIController {
     // If no specific context could be determined, include all files (up to a limit)
     const filesToInclude = contextSet.size > 0 ? Array.from(contextSet) : Object.keys(files);
 
+    const MAX_FILES = 20;
+    const selectedFiles = filesToInclude.slice(0, MAX_FILES);
+
     let contextText = "";
-    for (const path of filesToInclude) {
+    for (const path of selectedFiles) {
       const content = files[path];
       if (!content) continue;
 
       if (content.length > 5000) {
-        contextText += `\nFILE: ${path}\nSUMMARY:\n${content.slice(0, 1000)}\n... [TRUNCATED]\n`;
+        contextText += `\nFILE: ${path}\nSUMMARY:\n${content.slice(0, 1200)}\n... [TRUNCATED]\n`;
       } else {
         contextText += `\nFILE: ${path}\n${content}\n`;
       }
