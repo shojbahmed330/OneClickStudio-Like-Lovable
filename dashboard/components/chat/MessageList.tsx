@@ -62,8 +62,6 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, curre
         </div>
       )}
 
-      {isGenerating && <PhaseTimeline statuses={builderStatuses} currentPhase={phase} />}
-
       {messages.map((m, idx) => (
         <MessageItem 
           key={m.id || idx} 
@@ -75,6 +73,8 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isGenerating, curre
           phase={phase}
         />
       ))}
+
+      {isGenerating && <PhaseTimeline statuses={builderStatuses} currentPhase={phase} />}
       
       {isGenerating && (
         <div className="flex flex-col gap-3 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-[380px]">

@@ -4,6 +4,7 @@ import { User as UserType, Project, BuilderPhase } from '../types';
 import { useProjectManager } from './useProjectManager';
 import { useBuildManager } from './useBuildManager';
 import { useChatLogic } from './useChatLogic';
+import { DatabaseService } from '../services/dbService';
 
 export interface ToastMessage {
   id: string;
@@ -27,6 +28,28 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
   // 1. Project Management
   const projectManager = useProjectManager(user, addToast);
 
+  const handleTokenDeduct = useCallback(async () => {
+    if (!user) return true;
+    if (user.tokens <= 0) return false;
+
+    const previousTokens = user.tokens;
+    setUser({ ...user, tokens: user.tokens - 1 });
+
+    try {
+      const updatedUser = await DatabaseService.getInstance().useToken(user.id, user.email);
+      if (updatedUser) {
+        setUser(updatedUser);
+        return true;
+      } else {
+        setUser({ ...user, tokens: previousTokens });
+        return false;
+      }
+    } catch (e) {
+      setUser({ ...user, tokens: previousTokens });
+      return false;
+    }
+  }, [user, setUser]);
+
   // 2. Chat & AI Logic
   const chatLogic = useChatLogic(
     user,
@@ -37,7 +60,8 @@ export const useAppLogic = (user: UserType | null, setUser: (u: UserType | null)
     projectManager.workspace,
     addToast,
     projectManager.openFile,
-    projectManager.refreshHistory
+    projectManager.refreshHistory,
+    handleTokenDeduct
   );
 
   // 3. Build Management

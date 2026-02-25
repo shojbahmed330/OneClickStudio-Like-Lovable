@@ -49,7 +49,8 @@ export const useChatLogic = (
   workspace: WorkspaceType,
   addToast: (msg: string, type?: any) => void,
   openFile: (path: string) => void,
-  refreshHistory: () => void
+  refreshHistory: () => void,
+  onTokenDeduct?: () => Promise<boolean>
 ): ChatLogic => {
   const [messages, setMessagesState] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -150,6 +151,14 @@ INSTRUCTION: Analyze the test failures above. Fix the logic in the corresponding
 
     if (phase === BuilderPhase.EMPTY && !isAuto) {
       setPhase(BuilderPhase.PROMPT_SENT);
+    }
+
+    if (!isAuto && onTokenDeduct) {
+      const success = await onTokenDeduct();
+      if (!success) {
+        addToast("Insufficient tokens. Please recharge.", "error");
+        return;
+      }
     }
 
     const activeQueue = overrideQueue !== undefined ? overrideQueue : executionQueue;

@@ -143,6 +143,20 @@ const AppConfigView: React.FC<AppConfigViewProps> = ({ config, onUpdate, onBack 
                        <code>{config.selected_model}</code>
                        <button onClick={() => navigator.clipboard.writeText(config.selected_model || '')} className="p-2 hover:bg-white/5 rounded-lg transition-all"><Copy size={14}/></button>
                     </div>
+                    <button 
+                      onClick={async () => {
+                        try {
+                          const res = await fetch('http://127.0.0.1:11434/api/tags');
+                          if(res.ok) alert('Connection Successful! Ollama is running.');
+                          else alert('Connected to Ollama, but got an error.');
+                        } catch(e) {
+                          alert('Connection Failed! Ensure Ollama is running and CORS is configured.');
+                        }
+                      }}
+                      className="w-full py-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                    >
+                      Test Connection
+                    </button>
                  </div>
               </div>
            )}

@@ -13,7 +13,6 @@ const ActivityBar: React.FC<ActivityBarProps> = ({ activeView, onViewChange }) =
   const items = [
     { id: 'explorer', icon: Files, label: 'Explorer', short: 'Files' },
     { id: 'search', icon: Search, label: 'Search', short: 'Search' },
-    { id: 'thinking', icon: Brain, label: 'Neural Insights', short: 'Brain' },
     { id: 'history', icon: History, label: 'Version Timeline', short: 'History' },
   ];
 

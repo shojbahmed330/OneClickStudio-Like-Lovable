@@ -49,7 +49,7 @@ const DashboardView: React.FC<DashboardViewProps> = (props) => {
       <AppConfigView 
         config={props.projectConfig} 
         onUpdate={props.setProjectConfig} 
-        onBack={() => props.setMode(AppMode.EDIT)} 
+        onBack={() => props.setMode(AppMode.PREVIEW)} 
       />
     );
   }
