@@ -60,6 +60,22 @@ const DESIGN_SYSTEM = `### 🎨 MANDATORY DESIGN SYSTEM (STRICT):
 2. **SPACING & RADIUS:** Use Tailwind scale. \`rounded-xl\` for cards/buttons, \`rounded-2xl\` for containers.
 3. **TYPOGRAPHY:** Inter font. Headings: semibold, tracking-tight. Body: normal, leading-relaxed.`;
 
+const PATCH_MODE_RULE = `### 🔧 PATCH MODE (WHEN EDITING EXISTING FILES):
+If the file already exists in the PROJECT MAP:
+- DO NOT return the full file.
+- Return ONLY a unified diff patch format.
+- Use standard unified diff format:
+
+Example:
+--- app/components/Button.tsx
++++ app/components/Button.tsx
+@@ -12,7 +12,7 @@
+- const color = "red";
++ const color = "blue";
+
+If creating a NEW file:
+- Return full file normally.`;
+
 const RESPONSE_FORMAT = `### 🚀 RESPONSE FORMAT (JSON ONLY):
 {
   "thought": "DETAILED DEEP THINKING ANALYSIS (Logic, Strategy, Errors, Sync, UI/UX) in the User's language.",
@@ -135,19 +151,19 @@ export class GeminiService {
         systemInstruction = `${BASE_ROLE}\n\n${DEEP_THINKING}\n\n${DEPENDENCY_GRAPH}\n\n${MANDATORY_RULES}\n\n${PLANNING_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
       case 'coding': 
-        systemInstruction = `${BASE_ROLE}\n\n${DEEP_THINKING}\n\n${UNIT_TESTING}\n\n${DEPENDENCY_GRAPH}\n\n${SURGICAL_EDITING}\n\n${MANDATORY_RULES}\n\n${DESIGN_SYSTEM}\n\n${CODING_PROMPT}\n\n${RESPONSE_FORMAT}`; 
+        systemInstruction = `${BASE_ROLE}\n\n${DEEP_THINKING}\n\n${UNIT_TESTING}\n\n${DEPENDENCY_GRAPH}\n\n${SURGICAL_EDITING}\n\n${PATCH_MODE_RULE}\n\n${MANDATORY_RULES}\n\n${DESIGN_SYSTEM}\n\n${CODING_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
       case 'review': 
-        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${REVIEW_PROMPT}\n\n${RESPONSE_FORMAT}`; 
+        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${PATCH_MODE_RULE}\n\n${REVIEW_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
       case 'security': 
-        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${OPTIMIZATION_PROMPT}\n\n${RESPONSE_FORMAT}`; 
+        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${PATCH_MODE_RULE}\n\n${OPTIMIZATION_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
       case 'performance': 
-        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${PERFORMANCE_PROMPT}\n\n${RESPONSE_FORMAT}`; 
+        systemInstruction = `${BASE_ROLE}\n\n${SURGICAL_EDITING}\n\n${PATCH_MODE_RULE}\n\n${PERFORMANCE_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
       case 'uiux': 
-        systemInstruction = `${BASE_ROLE}\n\n${DESIGN_SYSTEM}\n\n${SURGICAL_EDITING}\n\n${UI_UX_PROMPT}\n\n${RESPONSE_FORMAT}`; 
+        systemInstruction = `${BASE_ROLE}\n\n${DESIGN_SYSTEM}\n\n${SURGICAL_EDITING}\n\n${PATCH_MODE_RULE}\n\n${UI_UX_PROMPT}\n\n${RESPONSE_FORMAT}`; 
         break;
     }
 
